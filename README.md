@@ -1,5 +1,5 @@
 ## Hi there 👋
-
+## Thank you for checking out my Data Analytics repository! I am a Pure Math major graduating from Anderson University interested in using my love for math and logic to make the world go 'round...maybe in data analytics! This was my first taste with DA, but I feel like I gained a solid foundation this semester. 
 <!--
 **erinmakosiej/erinmakosiej** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
 
