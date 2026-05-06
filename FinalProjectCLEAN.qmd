@@ -1,0 +1,469 @@
+---
+title: "Coffee Project"
+author: "Erin Makosiej, Maggie Hill, and Tanner Newman"
+date: "`r Sys.Date()`" 
+format: html
+editor: source
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#| label: setup 
+#| include: FALSE
+
+# Use the following to set global chunk options
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE, 
+  message = FALSE, 
+  error = TRUE, 
+  tidy.opts = list(width.cutoff = 80), 
+  tidy = TRUE
+)
+# warning = FALSE and message = FALSE suppress warnings and 
+# messages in the output document, but you will still see 
+# them in the console when you run the code.
+# error = TRUE will show errors in the output document.
+
+# load any libraries you need here
+library(here)
+library(tidyverse)
+library(vtable)
+library(ggstats)
+library(GGally)
+library(gmodels)
+library(pROC)
+library(lmtest)
+library(car)
+library(MASS)
+library(arm)
+library(dplyr)
+
+# set the location of things for the project
+# working directory saved to wd variable
+wd <- here()
+data_folder <- here("data")
+data_file <- "coffee.csv"
+
+```
+
+# Load data into data frame and clean.
+
+```{r}
+#| label: Load and Clean
+#| echo: false
+
+coffee <- read_csv(here(data_folder, data_file))
+
+# our variables: species, country, region, altitude, method, aroma, flavor, aftertaste, acidity, body, balance, uniformity, sweetness, total score
+
+# remove Location.Altitude.Min and Location.Altitude.Max, the year, data.owner, data.type.variety, data.production.numberofbags, data.production.bagweights, data.scores.moisture, data.color using subset
+coffee <- subset(coffee, select = -c(Location.Altitude.Min, Location.Altitude.Max, Year, Data.Owner, Data.Type.Variety, `Data.Production.Number of bags`, `Data.Production.Bag weight`, Data.Scores.Moisture, Data.Color))
+
+# Several altitude values were clearly unrealistic (e.g., values exceeding 100,000 meters) and were identified as data entry errors. These values were replaced with approximate regional averages based on known coffee-growing elevations for each region.
+coffee <- coffee %>%
+  mutate(
+    Location.Altitude.Average = case_when(
+      
+      # Guatemala - Huehuetenango
+      Location.Country == "Guatemala" & 
+      Location.Region == "huehuetenango" ~ 1700,
+      
+      # Guatemala - Oriente
+      Location.Country == "Guatemala" & 
+      Location.Region == "oriente" ~ 1400,
+      
+      # Nicaragua - Jinotega
+      Location.Country == "Nicaragua" & 
+      Location.Region == "jinotega" ~ 1300,
+      
+      # keep everything else the same
+      TRUE ~ Location.Altitude.Average
+    )
+  )
+
+# make Location.Country and and Data.Type.Species and Data.Type.Processing method into factors
+coffee$Location.Country <- as.factor(coffee$Location.Country)
+coffee$Data.Type.Species <- as.factor(coffee$Data.Type.Species)
+coffee$`Data.Type.Processing method` <- as.factor(coffee$`Data.Type.Processing method`)
+
+
+# replace all "nan" values with NULL
+coffee[coffee == "nan"] <- NA
+
+# remove rows with NA values in the processing method, species, country, and region columns
+coffee <- coffee %>% 
+  drop_na(`Data.Type.Processing method`, Data.Type.Species, Location.Country, Location.Region)
+
+
+# analyzing if region is significant to the model by changing the region variable to be a categorical variable with 4 categories: Africa, Latin America, Asia, and North America. I will assign each country to its respective region based on common geographical classifications. This way, I can include region as a predictor in the model and see if it has a significant effect on coffee quality scores.
+coffee <- coffee %>%
+  mutate(
+    # fix encoding issues first
+    Location.Country = case_when(
+      Location.Country == "Cote d?Ivoire" ~ "Cote d'Ivoire",
+      TRUE ~ Location.Country
+    ),
+    
+    Location.Region = case_when(
+      
+      # Africa
+      Location.Country %in% c(
+        "Ethiopia", "Kenya", "Uganda",
+        "Tanzania, United Republic Of",
+        "Rwanda", "Burundi", "Malawi", "Zambia",
+        "Cote d'Ivoire"
+      ) ~ "Africa",
+      
+      # Latin America (coffee-producing core)
+      Location.Country %in% c(
+        "Mexico", "Guatemala", "Honduras", "Nicaragua",
+        "Costa Rica", "El Salvador", "Panama",
+        "Colombia", "Peru", "Ecuador", "Brazil", "Haiti"
+      ) ~ "Latin America",
+      
+      # Asia
+      Location.Country %in% c(
+        "Indonesia", "Vietnam", "India", "Thailand",
+        "Philippines", "China", "Taiwan",
+        "Laos", "Myanmar"
+      ) ~ "Asia",
+      
+      # North America
+      Location.Country %in% c("United States") ~ "North America",
+      
+      # fallback
+      TRUE ~ "Other"
+    )
+  )
+
+coffee$Location.Region <- as.factor(coffee$Location.Region)
+
+coffee <- coffee %>% mutate(Data.Scores.Total = Data.Scores.Aroma + Data.Scores.Flavor + Data.Scores.Aftertaste + Data.Scores.Acidity + Data.Scores.Body + Data.Scores.Balance + Data.Scores.Uniformity + Data.Scores.Sweetness)
+      
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
+
+```{r}
+#| label: EDA 
+#| include: FALSE
+
+# UNIVARIATE ANALYSIS
+
+# summary statistics for numeric variables
+
+# total score variable (numeric)
+ggplot(coffee, aes(x = Data.Scores.Total)) +
+  geom_histogram(bins = 30) +
+  labs(
+    x = "Total Score",
+    y = "Count",
+    title = "Distribution of Total Scores"
+  )
+summary(coffee$Data.Scores.Total)
+# comments: the distribution of total scores is right-skewed, with a mean of 64.75 and a median of around 65. The minimum score is 50.91 and the maximum score is 71.84. This suggests that most coffee samples are of relatively high quality, with a few lower-quality outliers.
+
+# average altitude variable (numeric)
+# when I originally did this histogram, there were a few outlier data points in the 100000 range which is implausible. Since it was just 3 data points, I decided to replace those values with the average altitude for that region based on known coffee-growing elevations. After making those corrections, the histogram looks more reasonable and shows a left-skewed distribution of average altitudes. This code was put in the data cleaning portion.
+ggplot(coffee, aes(x = Location.Altitude.Average)) + 
+  geom_histogram(bins = 30) +
+  labs(
+    x = "Average Altitude",
+    y = "Count",
+    title = "Distribution of Average Altitude"
+  )
+summary(coffee$Location.Altitude.Average)
+# comments: the distribution of average altitude is left-skewed, with a mean of 1266 meters and a median of around 1400 meters. The minimum altitude is 0 meters (sea level) and the maximum altitude is 4287 meters. This suggests that most coffee samples are grown at moderate altitudes, with a few high-altitude outliers.
+
+# summary statistics for categorical variables
+
+# region variable (categorical)
+# The original region variable was unique for almost every data entry, which did not make it feasible for us to use. Instead, we changed the region variable to be a categorical variable with 4 categories: Africa, Latin America, Asia, and North America. I will assign each country to its respective region based on common geographical classifications. This way, I can include region as a predictor in the model and see if it has a significant effect on coffee quality scores.
+ggplot(coffee, aes(x = Location.Region)) +
+  geom_bar() +
+  labs(
+    x = "Region",
+    y = "Count",
+    title = "Distribution of Coffee Samples by Region"
+  )
+table(coffee$Location.Region)
+prop.table(table(coffee$Location.Region))
+# comments: A large proportion of the coffee samples originated from Latin America (approximately 70%), followed by Africa (13%), Asia (8%), and North America (less than 1%). This indicates a substantial imbalance in the dataset, with Latin America being heavily represented. As a result, model estimates may be more influenced by observations from this region, and comparisons involving underrepresented regions should be interpreted with caution.
+
+
+# species variable (categorical)
+ggplot(coffee, aes(x = Data.Type.Species)) +
+  geom_bar() +
+  labs(
+    x = "Species",
+    y = "Count",
+    title = "Distribution of Coffee Samples by Species"
+  )
+summary(coffee$Data.Type.Species)
+prop.table(table(coffee$Data.Type.Species))
+# comments: The majority of coffee samples in the dataset are of the Arabica species (approximately 99.1%) which would make it difficult to compare the quality scores between Arabica and Robusta due to the small number of Robusta samples (less than 1%). This imbalance may limit our ability to draw meaningful conclusions about the impact of species on coffee quality scores, so we will drop species from our model.
+
+
+# processing method variable (categorical)
+ggplot(coffee, aes(x = `Data.Type.Processing method`)) +
+  geom_bar() +
+  labs(
+    x = "Processing Method",
+    y = "Count",
+    title = "Distribution of Coffee Samples by Processing Method"
+  )
+summary(coffee$`Data.Type.Processing method`)
+prop.table(table(coffee$`Data.Type.Processing method`))
+# comments: The majority of coffee samples in the dataset were processed using the washed method (75.5%), followed by the natural/dry method (18.7%), with semi-washed (3.2%) and honey (0.7%) methods representing much smaller proportions. This indicates a substantial imbalance in the dataset, with the washed method being heavily represented. As a result, model estimates may be more influenced by observations from this method, and comparisons involving underrepresented processing methods should be interpreted with caution.
+
+
+# country variable (categorical)
+ggplot(coffee, aes(x = Location.Country)) +
+  geom_bar() +
+  labs(
+    x = "Country",
+    y = "Count",
+    title = "Distribution of Coffee Samples by Country"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+prop.table(table(coffee$Location.Country)) * 100
+# comments: Three countries (Colombia, Guatemala, and Mexico) accounted for approximately 53% of the coffee samples in the dataset. Only 6 countries each accounted for more than 2.7%. Half of the countries (16) accounted for less than 1% each. This indicates a substantial imbalance in the dataset, with a few countries being heavily represented while many others were underrepresented. As a result, model estimates may be more influenced by observations from the heavily represented countries, and comparisons involving underrepresented countries should be interpreted with caution.
+
+# These results suggest that several variables exhibit substantial imbalance or redundancy, which will inform variable selection and model construction in the subsequent analysis.
+
+
+# BIVARIATE ANALYSIS
+
+# chi squared for interaction b/n categorical 
+# our categorical variables are Location.Country, Location.Region, Data.Type.Species, and Data.Type.Processing method
+
+# bivariate plots for predictors vs. total score
+
+# region vs. total score
+ggplot(coffee, aes(x = Location.Region, y = Data.Scores.Total)) +
+  geom_boxplot() +
+  labs(
+    x = "Region",
+    y = "Total Score",
+    title = "Coffee Quality by Region"
+  )
+# score summary by region
+coffee %>%
+  group_by(Location.Region) %>%
+  summarise(
+    count = n(),
+    mean_score = mean(Data.Scores.Total, na.rm = TRUE),
+    median_score = median(Data.Scores.Total, na.rm = TRUE),
+    sd_score = sd(Data.Scores.Total, na.rm = TRUE)
+  )
+# comments: The boxplot indicated that coffee samples from Africa tended to have slightly higher total scores compared to those from Latin America, Asia, and North America. The median total score for Latin America, Asia, and North America was approximately 64.5, whereas the median for Africa was approximately 65.8. Greater variability in total scores was observed for Latin America, as indicated by a wider interquartile range and the presence of multiple outliers. These patterns suggested that region may be a relevant predictor of coffee quality and was retained for further modeling consideration.
+
+
+# altitude vs. total score
+ggplot(coffee, aes(x = Location.Altitude.Average, y = Data.Scores.Total)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm") +
+  labs(
+    x = "Altitude",
+    y = "Total Score",
+    title = "Relationship Between Altitude and Coffee Quality"
+  )
+# comments: The scatterplot revealed a positive relationship between altitude and total score, with higher-altitude coffee samples generally receiving higher quality scores. The fitted linear regression line indicated an upward trend, suggesting that as altitude increases, total scores tend to increase as well. However, there was considerable variability in total scores at all altitude levels, and the linear model may not fully capture the complexity of the relationship. Overall, altitude appears to be a relevant predictor of coffee quality, but further analysis is needed to assess the strength and nature of this relationship. No transformation is needed. 
+
+
+# species vs. total score
+ggplot(coffee, aes(x = Data.Type.Species, y = Data.Scores.Total)) +
+  geom_boxplot() +
+  labs(
+    x = "Species",
+    y = "Total Score",
+    title = "Coffee Quality by Species"
+  )
+# summary of total score based on species
+coffee %>%
+  group_by(Data.Type.Species) %>%
+  summarise(
+    count = n(),
+    mean_score = mean(Data.Scores.Total, na.rm = TRUE),
+    median_score = median(Data.Scores.Total, na.rm = TRUE),
+    sd_score = sd(Data.Scores.Total, na.rm = TRUE)
+  )
+# comments: The boxplot indicated that Arabica coffee samples tended to have higher total scores compared to Robusta samples. The mean total score for Arabica was approximately 64.8, while the mean for Robusta was approximately 63.4. However, the number of Robusta samples was very small (less than 1% of the dataset), which limits our ability to draw meaningful conclusions about the impact of species on coffee quality scores. Due to this imbalance, species may not be a reliable predictor in our model and should be interpreted with caution. This also includes why we do not see any outliers for the Robusta species, as there are so few data points that it is unlikely to capture the full range of variability in total scores for that species.
+
+
+# processing method vs. total score
+ggplot(coffee, aes(x = `Data.Type.Processing method`, y = Data.Scores.Total)) +
+  geom_boxplot() +
+  labs(
+    x = "Processing Method",
+    y = "Total Score",
+    title = "Coffee Quality by Processing Method"
+  )
+# summary of total score based on processing method
+coffee %>% 
+  group_by(`Data.Type.Processing method`) %>%
+  summarise(
+    count = n(),
+    mean_score = mean(Data.Scores.Total, na.rm = TRUE),
+    median_score = median(Data.Scores.Total, na.rm = TRUE),
+    sd_score = sd(Data.Scores.Total, na.rm = TRUE)
+  )
+# comments: The boxplot indicated that coffee samples processed using the semi-washed method tended to have higher total scores compared to those processed using the washed, natural/dry, and honey methods. The mean total score for semi-washed was approximately 65.5, while the means for washed, natural/dry, and honey were approximately 64.7, 65, and 65.2 respectively. However, the number of samples processed using the semi-washed and honey methods was very small (3.2% and 0.7% of the dataset respectively), which limits our ability to draw meaningful conclusions about the impact of processing method on coffee quality scores. It is important to note the washed method had the largest number of samples outside the interquartile range, indicating greater variability in total scores for this processing method. All interquartile ranges were relatively similar across processing methods, suggesting that the variability in total scores was comparable across methods.
+
+
+# CHI SQUARED to investigate the relationship between categorical variables
+
+# table_region_process <- table(coffee$Location.Region, coffee$`Data.Type.Processing method`)
+# chisq.test(table_region_process)
+# when ran above: Pearson's Chi-squared test, X-squared = NaN, df = 20, p-value = NA, Warning message: In chisq.test(table_region_process) : Chi-squared approximation may be incorrect
+table(coffee$Location.Region, coffee$`Data.Type.Processing method`)
+# above shows why we got error...too many zeros. so focus on main methods
+coffee <- coffee %>%
+  mutate(
+    Processing.Simplified = case_when(
+      `Data.Type.Processing method` == "Washed / Wet" ~ "Washed",
+      `Data.Type.Processing method` == "Natural / Dry" ~ "Natural",
+      TRUE ~ "Other"
+    )
+  )
+table_region_process <- table(coffee$Location.Region,coffee$Processing.Simplified)
+chisq.test(table_region_process)
+# A chi-square test of independence was conducted to assess the relationship between region and processing method. A statistically significant association was found (χ² = 146.58, df = 8, p < 0.001), indicating that processing methods were not evenly distributed across geographic regions. However, the chi-square approximation warning suggested that some expected cell counts were low, so results were interpreted with caution.
+# So in regression: may see overlapping effects/interaction
+
+
+region_country_table <- table(coffee$Location.Region, coffee$Location.Country)
+chisq.test(region_country_table)
+# A chi-square test of independence indicated a statistically significant association between region and country (χ² = 3584, df = 124, p < 0.001). This result was expected, as region classifications were derived directly from country groupings. The strong association confirmed that countries were consistently clustered within their assigned geographic regions.
+# In regression/model: we will remove country because there are 32 levels, a heavy imbalance, and collinearity with region (proven with χ² = 3584)
+
+
+# These bivariate analyses suggested that altitude and region showed the strongest relationships with coffee quality scores, while species and country exhibited limitations due to class imbalance.
+
+
+```
+
+
+
+### Task 4: Linear Regression
+
+```{r}
+#| label: linear_regression
+#| echo: TRUE
+
+# Based on exploratory analysis, a potential interaction between region and processing method was considered and formally tested.
+model_interaction <- lm(Data.Scores.Total ~ Location.Region * Location.Altitude.Average, data = coffee)
+summary(model_interaction)
+# no evidence of meaningful interaction
+
+# we will not consider country or species in this section as indicated in EDA section
+
+#univariate linear regression models to see how each variable individually predicts the total score of a coffee
+model_processing <- lm(Data.Scores.Total ~ `Data.Type.Processing method`, data = coffee)
+model_region <- lm(Data.Scores.Total ~ Location.Region, data = coffee)
+model_altitude <- lm(Data.Scores.Total ~ Location.Altitude.Average, data = coffee)
+
+summary(model_processing)
+summary(model_altitude)
+summary(model_region)
+#takeaway: region (p = basically 0) shows stronger associations with coffee quality score than processing method (p = 0.058) and altitude (p = 0.002) based on statistical significance looking at p-value; processing method not significant predictor
+# since processing method gives a p-value of 0.058 and that is not less than alpha, we do not find processing method to have a higher 
+
+#null model to be used as a baseline
+model_null <- lm(Data.Scores.Total ~ 1, data = coffee)
+model_full <- lm(
+  Data.Scores.Total ~ `Data.Type.Processing method` + Location.Region + Location.Altitude.Average,
+  data = coffee
+)
+#analyze the model_full model
+summary(model_full)
+
+# as shown above, we will remove processing method variable because low p value shows it was not a significant predictor
+model_reduced <- lm(
+  Data.Scores.Total ~ Location.Region,
+  data = coffee
+)
+summary(model_reduced)
+
+
+step_model <- step(
+  lm(Data.Scores.Total ~ `Data.Type.Processing method` + Location.Region + Location.Altitude.Average,
+     data = coffee),
+  direction = "both"
+)
+summary(step_model)
+# The stepwise regression selected region, processing method, and altitude as significant predictors of coffee quality, but the model explains only a small portion of variability (R² ≈ 0.08), indicating that other unmeasured factors likely play a major role.
+
+anova(model_reduced, model_full)
+# The ANOVA test indicates that adding altitude significantly improves the model over the reduced model (p = 0.0048), suggesting altitude has a small but statistically meaningful effect on coffee quality beyond region.
+anova(model_null, model_reduced)
+# The ANOVA test shows that adding region and processing method significantly improves the model over the null model (p < 0.001), confirming that these variables meaningfully contribute to explaining variation in coffee quality scores.
+
+
+coffee <- coffee %>%
+  filter(Location.Region != "Other")
+
+#make training and test sets to see if model_reduced is accurate
+set.seed(123)
+train_indices <- sample(1:nrow(coffee), size = 0.7 * nrow(coffee))
+train_data <- coffee[train_indices , ]
+test_data <- coffee[-train_indices , ]
+
+#fit the model on the training data
+model_reduced_train <- lm(
+  Data.Scores.Total ~ Location.Region,
+  data = train_data
+)
+predictions <- predict(model_reduced_train, newdata = test_data)
+
+#evaluate accuracy
+mse <- mean((test_data$Data.Scores.Total - predictions)^2)
+rmse <- sqrt(mse)
+rmse
+# RMSE = 1.98742
+
+
+model_full_train <- lm(
+  Data.Scores.Total ~ Location.Region + `Data.Type.Processing method` + Location.Altitude.Average,
+  data = train_data
+)
+pred_full <- predict(model_full_train, newdata = test_data)
+rmse_full <- sqrt(mean((test_data$Data.Scores.Total - pred_full)^2))
+rmse_full
+# RMSE = 1.991038
+
+plot(test_data$Data.Scores.Total, predictions,
+     xlab = "Actual Coffee Score",
+     ylab = "Predicted Coffee Score",
+     main = "Predicted vs Actual Coffee Scores")
+
+#checking residuals to check model validity
+par(mfrow = c(2, 2))
+plot(model_reduced_train)
+par(mfrow = c(1, 1))
+# comments: overall the residuals vs. fitted plot shows that the linearity assumption seems reasonable, but a few outliers do exist (AKA our model overpredicts some coffees a bit); qq plot for normality has a heavy lower tail driven by outliers, but results are approximately normal; scale-location plots for constant variance shows that variance is roughly constant; residuals vs. leverage plot shows no extremely influential points -> overall appropriate model
+
+
+region_colors <- as.factor(test_data$Location.Region)
+
+plot(test_data$Data.Scores.Total, predictions,
+     col = region_colors,
+     pch = 19,
+     xlab = "Actual Total Coffee Score",
+     ylab = "Predicted Total Coffee Score",
+     main = "Figure 4: Predicted vs Actual Total Coffee Score",
+     xlim = c(58, 70),
+     ylim = c(64, 67))
+
+legend("topleft",
+       legend = levels(as.factor(test_data$Location.Region)),
+       col = 1:length(levels(as.factor(test_data$Location.Region))),
+       pch = 19)
+
+
+```
+
+
+
